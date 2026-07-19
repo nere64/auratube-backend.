@@ -111,20 +111,23 @@ def download(
     
     print(f"Descargando en Render: {url} | Modo: {mode}")
 
-    # Configuración de bypass antibot de YouTube para datacenters (Render/AWS)
-    # Cambiamos el cliente del reproductor para imitar iOS y Web Móvil (mweb) para eludir bloqueos.
+    # Configuración de bypass antibot de YouTube
     extractor_args = {
         'youtube': {
             'player_client': ['ios', 'mweb']
         }
     }
 
-    # Verificar si existe un archivo cookies.txt en el directorio para autenticar automáticamente
+    # Verificar si existe un archivo cookies.txt en el directorio para autenticar
     cookie_file = "cookies.txt" if os.path.exists("cookies.txt") else None
 
     if mode == "video":
+        # CORRECCIÓN DE FORMATO:
+        # Descarga el mejor video y el mejor audio disponibles y los une en un archivo MP4 final usando FFmpeg.
+        # Esto previene errores de "Requested format is not available" cuando no hay un MP4 combinado pregenerado por YouTube.
         ydl_opts = {
-            'format': 'best[ext=mp4]/best',
+            'format': 'bestvideo+bestaudio/best',
+            'merge_output_format': 'mp4',
             'outtmpl': os.path.join(download_path, '%(title)s.%(ext)s'),
             'ffmpeg_location': FFMPEG_PATH,  # Usar binario de FFmpeg integrado
             'extractor_args': extractor_args,
@@ -140,13 +143,22 @@ def download(
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
                 filepath = ydl.prepare_filename(info)
-                filename = os.path.basename(filepath)
                 
-                background_tasks.add_task(clean_temp_file, filepath)
+                # Como combinamos formatos, aseguramos que la extensión sea .mp4
+                base, _ = os.path.splitext(filepath)
+                mp4_filepath = base + ".mp4"
+                
+                # Si el merge de ffmpeg cambió el nombre final del archivo de salida
+                if not os.path.exists(mp4_filepath) and os.path.exists(filepath):
+                    mp4_filepath = filepath
+                
+                filename = os.path.basename(mp4_filepath)
+                
+                background_tasks.add_task(clean_temp_file, mp4_filepath)
                 background_tasks.add_task(shutil.rmtree, download_path, ignore_errors=True)
                 
                 return FileResponse(
-                    path=filepath,
+                    path=mp4_filepath,
                     media_type="video/mp4",
                     filename=filename,
                     headers={"Content-Disposition": f'attachment; filename="{filename}"'}
