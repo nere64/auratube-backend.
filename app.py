@@ -111,15 +111,31 @@ def download(
     
     print(f"Descargando en Render: {url} | Modo: {mode}")
 
+    # Configuración de bypass antibot de YouTube para datacenters (Render/AWS)
+    # Cambiamos el cliente del reproductor para imitar iOS y Web Móvil (mweb) para eludir bloqueos.
+    extractor_args = {
+        'youtube': {
+            'player_client': ['ios', 'mweb']
+        }
+    }
+
+    # Verificar si existe un archivo cookies.txt en el directorio para autenticar automáticamente
+    cookie_file = "cookies.txt" if os.path.exists("cookies.txt") else None
+
     if mode == "video":
         ydl_opts = {
             'format': 'best[ext=mp4]/best',
             'outtmpl': os.path.join(download_path, '%(title)s.%(ext)s'),
             'ffmpeg_location': FFMPEG_PATH,  # Usar binario de FFmpeg integrado
+            'extractor_args': extractor_args,
             'quiet': True,
             'no_warnings': True,
         }
         
+        if cookie_file:
+            ydl_opts['cookiefile'] = cookie_file
+            print("Usando archivo cookies.txt para autenticación en video.")
+
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
@@ -144,6 +160,7 @@ def download(
             'format': 'bestaudio/best',
             'outtmpl': os.path.join(download_path, '%(title)s.%(ext)s'),
             'ffmpeg_location': FFMPEG_PATH,  # Usar binario de FFmpeg integrado
+            'extractor_args': extractor_args,
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
@@ -153,6 +170,10 @@ def download(
             'no_warnings': True,
         }
         
+        if cookie_file:
+            ydl_opts['cookiefile'] = cookie_file
+            print("Usando archivo cookies.txt para autenticación en audio.")
+
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
