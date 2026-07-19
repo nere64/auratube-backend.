@@ -6,17 +6,17 @@ import imageio_ffmpeg
 from fastapi import FastAPI, Query, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+import json
+import time
 
-# Obtener la ruta del binario estático de FFmpeg
 FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
 
 app = FastAPI(
     title="AuraTube API",
     description="API de descarga de YouTube para Spaceship",
-    version="5.0.0"
+    version="6.0.0"
 )
 
-# CORS para Spaceship
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,7 +28,6 @@ app.add_middleware(
 TEMP_DIR = "/tmp/auratube"
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-# Verificar cookies
 COOKIE_FILE = "cookies.txt"
 HAS_COOKIES = os.path.exists(COOKIE_FILE)
 
@@ -44,40 +43,6 @@ def clean_temp_file(filepath: str):
             print(f"Archivo eliminado: {filepath}")
         except Exception as e:
             print(f"Error al eliminar: {e}")
-
-def get_best_format(formats, mode='audio'):
-    """Selecciona el mejor formato disponible automáticamente"""
-    if mode == 'audio':
-        # Buscar mejor audio
-        for f in formats:
-            if f.get('acodec') != 'none' and f.get('vcodec') == 'none':
-                # Priorizar m4a y mp4 con mejor calidad
-                if f.get('ext') in ['m4a', 'mp4']:
-                    return f.get('format_id')
-        # Fallback: cualquier audio
-        for f in formats:
-            if f.get('acodec') != 'none' and f.get('vcodec') == 'none':
-                return f.get('format_id')
-        return None
-    else:  # video
-        # Buscar mejor video con audio incluido
-        for f in formats:
-            if (f.get('ext') == 'mp4' and 
-                f.get('vcodec') != 'none' and 
-                f.get('acodec') != 'none' and
-                'h264' in f.get('vcodec', '').lower()):
-                return f.get('format_id')
-        # Fallback: cualquier mp4 con audio
-        for f in formats:
-            if (f.get('ext') == 'mp4' and 
-                f.get('vcodec') != 'none' and 
-                f.get('acodec') != 'none'):
-                return f.get('format_id')
-        # Último recurso: cualquier formato
-        for f in formats:
-            if f.get('vcodec') != 'none':
-                return f.get('format_id')
-        return None
 
 @app.get("/", response_class=HTMLResponse)
 def index():
@@ -130,7 +95,7 @@ def index():
     <body>
         <div class="container">
             <div class="badge">● ONLINE</div>
-            <h1>AuraTube API</h1>
+            <h1>AuraTube API v6</h1>
             <p style="color: #94a3b8;">Servidor activo para Spaceship</p>
             <div class="status">✅ Conectado a Render</div>
         </div>
@@ -140,14 +105,25 @@ def index():
 
 @app.get("/info")
 def video_info(url: str = Query(..., description="URL de YouTube")):
-    """Obtiene información del video sin descargar"""
+    """Obtiene información del video usando configuración anti-bloqueo"""
     try:
+        # Configuración EXTRA para evitar bloqueos
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
-            'extract_flat': False,
+            'extract_flat': 'in_playlist',
+            'ignoreerrors': True,
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-us,en;q=0.5',
+                'Sec-Fetch-Mode': 'navigate',
+            },
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'ios'],
+                    'skip': ['hls', 'dash'],
+                }
             }
         }
         
@@ -155,14 +131,22 @@ def video_info(url: str = Query(..., description="URL de YouTube")):
             ydl_opts['cookiefile'] = COOKIE_FILE
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # Intentar extraer información
             info = ydl.extract_info(url, download=False)
             
+            if not info:
+                return JSONResponse(
+                    status_code=404,
+                    content={"success": False, "error": "No se pudo obtener información del video"}
+                )
+            
+            # Extraer datos básicos
             return {
                 "success": True,
-                "title": info.get('title', ''),
+                "title": info.get('title', 'Sin título'),
                 "duration": info.get('duration', 0),
                 "thumbnail": info.get('thumbnail', ''),
-                "uploader": info.get('uploader', ''),
+                "uploader": info.get('uploader', 'Desconocido'),
                 "view_count": info.get('view_count', 0),
                 "formats": [
                     {
@@ -170,17 +154,43 @@ def video_info(url: str = Query(..., description="URL de YouTube")):
                         "ext": f.get('ext'),
                         "resolution": f.get('resolution', 'N/A'),
                         "filesize": f.get('filesize', 0),
-                        "format_note": f.get('format_note', ''),
-                        "vcodec": f.get('vcodec', 'none'),
-                        "acodec": f.get('acodec', 'none')
+                        "format_note": f.get('format_note', '')
                     }
-                    for f in info.get('formats', [])
-                    if f.get('ext') in ['mp4', 'm4a', 'webm', 'mp3']
+                    for f in info.get('formats', [])[:10]  # Solo primeros 10 formatos
                 ]
             }
+            
     except Exception as e:
         error_msg = str(e)
         print(f"Error en /info: {error_msg}")
+        
+        # Si falla, intentar con otra configuración
+        try:
+            print("Intentando con configuración alternativa...")
+            ydl_opts_alt = {
+                'quiet': True,
+                'no_warnings': True,
+                'extract_flat': True,
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+                }
+            }
+            
+            with yt_dlp.YoutubeDL(ydl_opts_alt) as ydl:
+                info = ydl.extract_info(url, download=False)
+                if info:
+                    return {
+                        "success": True,
+                        "title": info.get('title', 'Sin título'),
+                        "duration": info.get('duration', 0),
+                        "thumbnail": info.get('thumbnail', ''),
+                        "uploader": info.get('uploader', 'Desconocido'),
+                        "view_count": info.get('view_count', 0),
+                        "formats": []
+                    }
+        except:
+            pass
+        
         return JSONResponse(
             status_code=500,
             content={"success": False, "error": error_msg}
@@ -198,40 +208,24 @@ def download(
     
     print(f"Descargando: {url} | Modo: {mode}")
 
-    # PRIMERO: Obtener formatos disponibles
-    try:
-        with yt_dlp.YoutubeDL({'quiet': True, 'no_warnings': True}) as ydl:
-            info = ydl.extract_info(url, download=False)
-            formats = info.get('formats', [])
-            
-            if not formats:
-                raise HTTPException(status_code=400, detail="No se encontraron formatos disponibles")
-            
-            # Seleccionar el mejor formato automáticamente
-            best_format_id = get_best_format(formats, mode)
-            
-            if not best_format_id:
-                raise HTTPException(status_code=400, detail="No se encontró un formato adecuado")
-            
-            print(f"✅ Formato seleccionado: {best_format_id}")
-            
-    except Exception as e:
-        shutil.rmtree(download_path, ignore_errors=True)
-        error_msg = str(e)
-        print(f"Error obteniendo formatos: {error_msg}")
-        raise HTTPException(status_code=500, detail=f"Error: {error_msg}")
-
-    # Configuración con el formato seleccionado
+    # Configuración ANTI-BLOQUEO mejorada
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
-        'ignoreerrors': False,
+        'ignoreerrors': True,
         'retries': 10,
         'fragment_retries': 10,
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'en-us,en;q=0.5',
+            'Sec-Fetch-Mode': 'navigate',
+        },
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios'],
+                'skip': ['hls', 'dash'],
+            }
         }
     }
 
@@ -240,8 +234,9 @@ def download(
         print("✅ Usando cookies.txt")
 
     if mode == "video":
+        # Para video: usar formato que siempre existe en YouTube
         ydl_opts.update({
-            'format': best_format_id,  # Usar el formato específico
+            'format': 'best[height<=720][ext=mp4]/best[ext=mp4]/best',
             'outtmpl': os.path.join(download_path, '%(title)s.%(ext)s'),
             'ffmpeg_location': FFMPEG_PATH,
         })
@@ -249,9 +244,12 @@ def download(
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
+                
+                if not info:
+                    raise Exception("No se pudo obtener información del video")
+                
                 filepath = ydl.prepare_filename(info)
                 
-                # Buscar el archivo descargado
                 if os.path.exists(filepath):
                     filename = os.path.basename(filepath)
                     background_tasks.add_task(clean_temp_file, filepath)
@@ -262,7 +260,7 @@ def download(
                         filename=filename
                     )
                 else:
-                    # Buscar cualquier archivo en el directorio
+                    # Buscar cualquier archivo
                     files = os.listdir(download_path)
                     if files:
                         filepath = os.path.join(download_path, files[0])
@@ -281,17 +279,16 @@ def download(
             error_msg = str(e)
             print(f"Error en video: {error_msg}")
             
-            # Intentar con formato alternativo
-            if "Requested format is not available" in error_msg:
-                try:
-                    # Usar formato genérico como fallback
-                    fallback_opts = ydl_opts.copy()
-                    fallback_opts['format'] = 'best[ext=mp4]/best'
-                    
-                    with yt_dlp.YoutubeDL(fallback_opts) as ydl:
-                        info = ydl.extract_info(url, download=True)
+            # Último intento: formato más genérico
+            try:
+                print("Intentando con formato genérico...")
+                ydl_opts_gen = ydl_opts.copy()
+                ydl_opts_gen['format'] = 'best'
+                
+                with yt_dlp.YoutubeDL(ydl_opts_gen) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    if info:
                         filepath = ydl.prepare_filename(info)
-                        
                         if os.path.exists(filepath):
                             filename = os.path.basename(filepath)
                             background_tasks.add_task(clean_temp_file, filepath)
@@ -301,14 +298,14 @@ def download(
                                 media_type="video/mp4",
                                 filename=filename
                             )
-                except Exception as e2:
-                    error_msg = str(e2)
+            except:
+                pass
             
             raise HTTPException(status_code=500, detail=error_msg)
     
     else:  # audio
         ydl_opts.update({
-            'format': best_format_id,  # Usar el formato específico
+            'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio',
             'outtmpl': os.path.join(download_path, '%(title)s.%(ext)s'),
             'ffmpeg_location': FFMPEG_PATH,
             'postprocessors': [{
@@ -321,6 +318,10 @@ def download(
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
+                
+                if not info:
+                    raise Exception("No se pudo obtener información del video")
+                
                 filepath = ydl.prepare_filename(info)
                 
                 # Buscar MP3
@@ -354,16 +355,16 @@ def download(
             error_msg = str(e)
             print(f"Error en audio: {error_msg}")
             
-            # Intentar con formato genérico como fallback
-            if "Requested format is not available" in error_msg:
-                try:
-                    fallback_opts = ydl_opts.copy()
-                    fallback_opts['format'] = 'bestaudio/best'
-                    
-                    with yt_dlp.YoutubeDL(fallback_opts) as ydl:
-                        info = ydl.extract_info(url, download=True)
+            # Último intento
+            try:
+                print("Intentando con formato genérico de audio...")
+                ydl_opts_gen = ydl_opts.copy()
+                ydl_opts_gen['format'] = 'bestaudio'
+                
+                with yt_dlp.YoutubeDL(ydl_opts_gen) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    if info:
                         filepath = ydl.prepare_filename(info)
-                        
                         mp3_file = os.path.splitext(filepath)[0] + ".mp3"
                         if os.path.exists(mp3_file):
                             filename = os.path.basename(mp3_file)
@@ -374,8 +375,8 @@ def download(
                                 media_type="audio/mpeg",
                                 filename=filename
                             )
-                except Exception as e2:
-                    error_msg = str(e2)
+            except:
+                pass
             
             raise HTTPException(status_code=500, detail=error_msg)
 
@@ -383,7 +384,7 @@ def download(
 def health():
     return {
         "status": "healthy",
-        "version": "5.0.0",
+        "version": "6.0.0",
         "cookies_available": HAS_COOKIES,
         "ffmpeg_available": os.path.exists(FFMPEG_PATH)
     }
