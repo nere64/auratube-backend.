@@ -4,17 +4,19 @@ import shutil
 import yt_dlp
 import imageio_ffmpeg
 from fastapi import FastAPI, Query, BackgroundTasks, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
+# Obtener la ruta del binario estático de FFmpeg
 FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
 
 app = FastAPI(
-    title="AuraTube API (Render)",
+    title="AuraTube API",
     description="API de descarga de YouTube para Spaceship",
     version="4.0.0"
 )
 
+# CORS para Spaceship
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -26,18 +28,12 @@ app.add_middleware(
 TEMP_DIR = "/tmp/auratube"
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-# Verificar cookies al inicio
+# Verificar cookies
 COOKIE_FILE = "cookies.txt"
 HAS_COOKIES = os.path.exists(COOKIE_FILE)
 
 if HAS_COOKIES:
     print(f"✅ Cookies encontradas: {COOKIE_FILE}")
-    # Mostrar primeras líneas para debug
-    with open(COOKIE_FILE, 'r') as f:
-        lines = f.readlines()[:5]
-        print("Primeras líneas de cookies:")
-        for line in lines:
-            print(line.strip())
 else:
     print("⚠️ No se encontró archivo cookies.txt")
 
@@ -49,21 +45,130 @@ def clean_temp_file(filepath: str):
         except Exception as e:
             print(f"Error al eliminar: {e}")
 
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
 def index():
     return """
     <!DOCTYPE html>
     <html>
-    <head><title>AuraTube API</title></head>
-    <body style="background:#0a0a0f;color:#fff;font-family:sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;">
-        <div style="text-align:center;">
-            <h1 style="background:linear-gradient(135deg,#06b6d4,#a855f7);-webkit-background-clip:text;-webkit-text-fill-color:transparent;">AuraTube API</h1>
-            <p style="color:#94a3b8;">Servidor activo para Spaceship</p>
-            <p style="color:#10b981;">✅ Cookies: {}</p>
+    <head>
+        <title>AuraTube API</title>
+        <meta charset="UTF-8">
+        <style>
+            body {
+                background: #0a0a0f;
+                color: #fff;
+                font-family: system-ui, -apple-system, sans-serif;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                height: 100vh;
+                margin: 0;
+            }
+            .container {
+                text-align: center;
+                padding: 40px;
+                background: rgba(255,255,255,0.03);
+                border-radius: 20px;
+                border: 1px solid rgba(255,255,255,0.06);
+                max-width: 500px;
+            }
+            h1 {
+                background: linear-gradient(135deg, #06b6d4, #a855f7);
+                -webkit-background-clip: text;
+                -webkit-text-fill-color: transparent;
+                font-size: 2.5rem;
+            }
+            .status {
+                color: #10b981;
+                font-size: 0.9rem;
+                margin: 10px 0;
+            }
+            .badge {
+                display: inline-block;
+                background: rgba(16,185,129,0.15);
+                color: #10b981;
+                padding: 4px 12px;
+                border-radius: 20px;
+                font-size: 0.8rem;
+            }
+            .endpoints {
+                text-align: left;
+                margin-top: 20px;
+                background: rgba(0,0,0,0.3);
+                padding: 15px;
+                border-radius: 12px;
+            }
+            .endpoints code {
+                color: #a855f7;
+                font-size: 0.8rem;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="badge">● ONLINE</div>
+            <h1>AuraTube API</h1>
+            <p style="color: #94a3b8;">Servidor activo para Spaceship</p>
+            <div class="status">✅ Conectado a Render</div>
+            <div class="endpoints">
+                <div><code>/info?url=URL</code> - Obtener info del video</div>
+                <div><code>/download?url=URL&mode=audio|video</code> - Descargar</div>
+                <div><code>/health</code> - Estado del servidor</div>
+            </div>
         </div>
     </body>
     </html>
-    """.format("Activas" if HAS_COOKIES else "No disponibles")
+    """
+
+@app.get("/info")
+def video_info(url: str = Query(..., description="URL de YouTube")):
+    """Obtiene información del video sin descargar"""
+    try:
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': False,
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            }
+        }
+        
+        # Usar cookies si existen
+        if HAS_COOKIES:
+            ydl_opts['cookiefile'] = COOKIE_FILE
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            
+            # Formatear respuesta para Spaceship
+            return {
+                "success": True,
+                "title": info.get('title', ''),
+                "duration": info.get('duration', 0),
+                "thumbnail": info.get('thumbnail', ''),
+                "uploader": info.get('uploader', ''),
+                "view_count": info.get('view_count', 0),
+                "formats": [
+                    {
+                        "format_id": f.get('format_id'),
+                        "ext": f.get('ext'),
+                        "resolution": f.get('resolution', 'N/A'),
+                        "filesize": f.get('filesize', 0),
+                        "format_note": f.get('format_note', ''),
+                        "vcodec": f.get('vcodec', 'none'),
+                        "acodec": f.get('acodec', 'none')
+                    }
+                    for f in info.get('formats', [])
+                    if f.get('ext') in ['mp4', 'm4a', 'webm', 'mp3']
+                ]
+            }
+    except Exception as e:
+        error_msg = str(e)
+        print(f"Error en /info: {error_msg}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": error_msg}
+        )
 
 @app.get("/download")
 def download(
@@ -97,7 +202,7 @@ def download(
         ydl_opts['cookiefile'] = COOKIE_FILE
         print("✅ Usando cookies.txt para autenticación")
     else:
-        print("⚠️ Descargando sin cookies (puede fallar en videos restringidos)")
+        print("⚠️ Descargando sin cookies")
 
     if mode == "video":
         ydl_opts.update({
@@ -140,7 +245,7 @@ def download(
             if "Sign in to confirm" in error_msg:
                 raise HTTPException(
                     status_code=403,
-                    detail="YouTube requiere autenticación. El archivo cookies.txt no es válido o ha expirado. Regenera las cookies siguiendo la guía."
+                    detail="YouTube requiere autenticación. El archivo cookies.txt no es válido o ha expirado."
                 )
             raise HTTPException(status_code=500, detail=error_msg)
     
@@ -191,14 +296,16 @@ def download(
             if "Sign in to confirm" in error_msg:
                 raise HTTPException(
                     status_code=403,
-                    detail="YouTube requiere autenticación. El archivo cookies.txt no es válido o ha expirado. Regenera las cookies siguiendo la guía."
+                    detail="YouTube requiere autenticación. El archivo cookies.txt no es válido o ha expirado."
                 )
             raise HTTPException(status_code=500, detail=error_msg)
 
 @app.get("/health")
 def health():
+    """Endpoint para verificar el estado del servidor"""
     return {
         "status": "healthy",
         "version": "4.0.0",
-        "cookies_available": HAS_COOKIES
+        "cookies_available": HAS_COOKIES,
+        "ffmpeg_available": os.path.exists(FFMPEG_PATH)
     }
