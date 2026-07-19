@@ -4,16 +4,12 @@ import shutil
 import yt_dlp
 import imageio_ffmpeg
 from fastapi import FastAPI, Query, BackgroundTasks, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
 
-app = FastAPI(
-    title="AuraTube API",
-    description="API de descarga de YouTube para Spaceship",
-    version="6.0.0"
-)
+app = FastAPI(title="AuraTube API", version="6.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -29,6 +25,8 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 COOKIE_FILE = "cookies.txt"
 HAS_COOKIES = os.path.exists(COOKIE_FILE)
 
+print(f"✅ Cookies disponibles: {HAS_COOKIES}")
+
 def clean_temp_file(filepath: str):
     if os.path.exists(filepath):
         try:
@@ -40,9 +38,9 @@ def clean_temp_file(filepath: str):
 @app.get("/")
 def index():
     return {
-        "status": "online",
         "service": "AuraTube API",
-        "version": "6.0.0",
+        "version": "6.1.0",
+        "cookies_available": HAS_COOKIES,
         "endpoints": {
             "/health": "Estado del servidor",
             "/info": "Información del video",
@@ -54,31 +52,46 @@ def index():
 def health():
     return {
         "status": "healthy",
-        "version": "6.0.0",
+        "version": "6.1.0",
         "cookies_available": HAS_COOKIES,
         "ffmpeg_available": os.path.exists(FFMPEG_PATH)
     }
 
 @app.get("/info")
 def video_info(url: str = Query(..., description="URL de YouTube")):
-    """Obtiene información del video sin descargar"""
+    """Obtiene información del video usando cookies"""
     try:
+        # Configuración con cookies OBLIGATORIAS
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
-            'extract_flat': True,
+            'extract_flat': False,
             'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Sec-Fetch-Mode': 'navigate',
             },
             'extractor_args': {
                 'youtube': {
                     'player_client': ['android', 'ios'],
+                    'skip': ['hls', 'dash'],
                 }
             }
         }
         
+        # FORZAR USO DE COOKIES
         if HAS_COOKIES:
             ydl_opts['cookiefile'] = COOKIE_FILE
+            print(f"✅ Usando cookies: {COOKIE_FILE}")
+        else:
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "success": False, 
+                    "error": "Se requieren cookies para acceder a YouTube. Sube un archivo cookies.txt"
+                }
+            )
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -86,8 +99,21 @@ def video_info(url: str = Query(..., description="URL de YouTube")):
             if not info:
                 return JSONResponse(
                     status_code=404,
-                    content={"success": False, "error": "No se pudo obtener información"}
+                    content={"success": False, "error": "No se pudo obtener información del video"}
                 )
+            
+            # Extraer datos
+            formats = []
+            for f in info.get('formats', []):
+                formats.append({
+                    "format_id": f.get('format_id'),
+                    "ext": f.get('ext'),
+                    "resolution": f.get('resolution', 'N/A'),
+                    "filesize": f.get('filesize', 0),
+                    "format_note": f.get('format_note', ''),
+                    "vcodec": f.get('vcodec', 'none'),
+                    "acodec": f.get('acodec', 'none')
+                })
             
             return {
                 "success": True,
@@ -96,21 +122,15 @@ def video_info(url: str = Query(..., description="URL de YouTube")):
                 "thumbnail": info.get('thumbnail', ''),
                 "uploader": info.get('uploader', 'Desconocido'),
                 "view_count": info.get('view_count', 0),
-                "formats": [
-                    {
-                        "format_id": f.get('format_id'),
-                        "ext": f.get('ext'),
-                        "resolution": f.get('resolution', 'N/A'),
-                        "filesize": f.get('filesize', 0),
-                    }
-                    for f in info.get('formats', [])[:5]
-                ]
+                "formats": formats[:10]  # Solo primeros 10 formatos
             }
             
     except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Error en /info: {error_msg}")
         return JSONResponse(
             status_code=500,
-            content={"success": False, "error": str(e)}
+            content={"success": False, "error": error_msg}
         )
 
 @app.get("/download")
@@ -119,19 +139,28 @@ def download(
     mode: str = Query("audio", description="audio o video"),
     background_tasks: BackgroundTasks = BackgroundTasks()
 ):
+    if not HAS_COOKIES:
+        raise HTTPException(
+            status_code=403,
+            detail="Se requieren cookies para descargar. Sube un archivo cookies.txt"
+        )
+    
     download_id = str(uuid.uuid4())
     download_path = os.path.join(TEMP_DIR, download_id)
     os.makedirs(download_path, exist_ok=True)
     
-    print(f"Descargando: {url} | Modo: {mode}")
+    print(f"⬇️ Descargando: {url} | Modo: {mode}")
 
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
-        'ignoreerrors': True,
+        'ignoreerrors': False,
         'retries': 10,
+        'fragment_retries': 10,
+        'cookiefile': COOKIE_FILE,  # FORZAR cookies
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         },
         'extractor_args': {
             'youtube': {
@@ -143,9 +172,6 @@ def download(
         'ffmpeg_location': FFMPEG_PATH,
     }
 
-    if HAS_COOKIES:
-        ydl_opts['cookiefile'] = COOKIE_FILE
-
     if mode == "video":
         ydl_opts['format'] = 'best[height<=720][ext=mp4]/best[ext=mp4]/best'
         
@@ -154,7 +180,6 @@ def download(
                 info = ydl.extract_info(url, download=True)
                 filepath = ydl.prepare_filename(info)
                 
-                # Buscar el archivo descargado
                 if os.path.exists(filepath):
                     filename = os.path.basename(filepath)
                     background_tasks.add_task(clean_temp_file, filepath)
@@ -165,7 +190,6 @@ def download(
                         filename=filename
                     )
                 else:
-                    # Buscar cualquier archivo
                     files = os.listdir(download_path)
                     if files:
                         filepath = os.path.join(download_path, files[0])
