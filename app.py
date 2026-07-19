@@ -6,6 +6,7 @@ import imageio_ffmpeg
 from fastapi import FastAPI, Query, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
+import time
 
 # Obtener la ruta del binario estático de FFmpeg integrado en imageio-ffmpeg
 FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
@@ -13,7 +14,7 @@ FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
 app = FastAPI(
     title="AuraTube API (Render)",
     description="API privada y gratuita de descarga de música (MP3) y video (MP4) basada en yt-dlp y FFmpeg.",
-    version="2.0.0"
+    version="2.1.0"
 )
 
 # Habilitar CORS
@@ -147,7 +148,7 @@ def index():
                 <div class="feature-item">🎬 <span>MP4</span> HD</div>
                 <div class="feature-item">⚡ <span>Rápido</span></div>
             </div>
-            <div class="version">v2.0.0 • FFmpeg integrado</div>
+            <div class="version">v2.1.0 • FFmpeg integrado</div>
         </div>
     </body>
     </html>
@@ -165,31 +166,29 @@ def download(
     
     print(f"Descargando en Render: {url} | Modo: {mode} | ID: {download_id}")
 
-    # Configuración de bypass antibot de YouTube mejorada
+    # Configuración de bypass antibot de YouTube
     extractor_args = {
         'youtube': {
-            'player_client': ['ios', 'mweb', 'android'],
-            'skip': ['dash'],  # Saltar DASH para evitar problemas
+            'player_client': ['ios', 'mweb'],
+            'skip': ['hls', 'dash'],
         }
     }
 
-    # Verificar si existe un archivo cookies.txt en el directorio para autenticar
+    # Verificar cookies
     cookie_file = "cookies.txt" if os.path.exists("cookies.txt") else None
 
     if mode == "video":
-        # Configuración mejorada para video con múltiples fallbacks
+        # Configuración SIMPLIFICADA para video
         ydl_opts = {
-            'format': 'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio/bestvideo+bestaudio/best[ext=mp4]/best',
-            'merge_output_format': 'mp4',
+            'format': 'best[ext=mp4]/best',
             'outtmpl': os.path.join(download_path, '%(title)s.%(ext)s'),
             'ffmpeg_location': FFMPEG_PATH,
             'extractor_args': extractor_args,
-            'quiet': False,
-            'no_warnings': False,
-            'ignoreerrors': True,
-            'retries': 5,
-            'fragment_retries': 5,
-            'skip_download': False,
+            'quiet': True,
+            'no_warnings': True,
+            'ignoreerrors': False,
+            'retries': 10,
+            'fragment_retries': 10,
         }
         
         if cookie_file:
@@ -201,30 +200,39 @@ def download(
                 # Descargar el video
                 info = ydl.extract_info(url, download=True)
                 
-                # Buscar el archivo descargado
-                downloaded_files = os.listdir(download_path)
-                if not downloaded_files:
-                    raise Exception("No se descargó ningún archivo")
+                # Obtener el nombre del archivo
+                filepath = ydl.prepare_filename(info)
                 
-                # Buscar archivo MP4
-                mp4_files = [f for f in downloaded_files if f.endswith('.mp4')]
-                if mp4_files:
-                    filepath = os.path.join(download_path, mp4_files[0])
+                # Verificar que el archivo existe
+                if os.path.exists(filepath):
+                    filename = os.path.basename(filepath)
+                    background_tasks.add_task(clean_temp_file, filepath)
+                    background_tasks.add_task(shutil.rmtree, download_path, ignore_errors=True)
+                    
+                    return FileResponse(
+                        path=filepath,
+                        media_type="video/mp4",
+                        filename=filename,
+                        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+                    )
                 else:
-                    # Usar el primer archivo descargado
-                    filepath = os.path.join(download_path, downloaded_files[0])
-                
-                filename = os.path.basename(filepath)
-                
-                background_tasks.add_task(clean_temp_file, filepath)
-                background_tasks.add_task(shutil.rmtree, download_path, ignore_errors=True)
-                
-                return FileResponse(
-                    path=filepath,
-                    media_type="video/mp4",
-                    filename=filename,
-                    headers={"Content-Disposition": f'attachment; filename="{filename}"'}
-                )
+                    # Buscar cualquier archivo en el directorio
+                    downloaded_files = os.listdir(download_path)
+                    if downloaded_files:
+                        filepath = os.path.join(download_path, downloaded_files[0])
+                        filename = os.path.basename(filepath)
+                        background_tasks.add_task(clean_temp_file, filepath)
+                        background_tasks.add_task(shutil.rmtree, download_path, ignore_errors=True)
+                        
+                        return FileResponse(
+                            path=filepath,
+                            media_type="video/mp4",
+                            filename=filename,
+                            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+                        )
+                    else:
+                        raise Exception("No se encontró ningún archivo descargado")
+                        
         except Exception as e:
             shutil.rmtree(download_path, ignore_errors=True)
             error_msg = str(e)
@@ -242,11 +250,11 @@ def download(
                 'preferredcodec': 'mp3',
                 'preferredquality': '192',
             }],
-            'quiet': False,
-            'no_warnings': False,
-            'ignoreerrors': True,
-            'retries': 5,
-            'fragment_retries': 5,
+            'quiet': True,
+            'no_warnings': True,
+            'ignoreerrors': False,
+            'retries': 10,
+            'fragment_retries': 10,
         }
         
         if cookie_file:
@@ -255,32 +263,46 @@ def download(
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                # Descargar y convertir a MP3
                 info = ydl.extract_info(url, download=True)
                 
-                # Buscar el archivo MP3
-                downloaded_files = os.listdir(download_path)
-                mp3_files = [f for f in downloaded_files if f.endswith('.mp3')]
+                # Obtener el nombre del archivo original
+                filepath = ydl.prepare_filename(info)
                 
-                if mp3_files:
-                    filepath = os.path.join(download_path, mp3_files[0])
+                # El archivo MP3 debería tener extensión .mp3
+                base, _ = os.path.splitext(filepath)
+                mp3_filepath = base + ".mp3"
+                
+                # Verificar si existe el MP3
+                if os.path.exists(mp3_filepath):
+                    filename = os.path.basename(mp3_filepath)
+                    background_tasks.add_task(clean_temp_file, mp3_filepath)
+                    background_tasks.add_task(shutil.rmtree, download_path, ignore_errors=True)
+                    
+                    return FileResponse(
+                        path=mp3_filepath,
+                        media_type="audio/mpeg",
+                        filename=filename,
+                        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+                    )
                 else:
-                    # Si no hay MP3, intentar encontrar el archivo descargado
+                    # Buscar cualquier archivo MP3 en el directorio
+                    downloaded_files = [f for f in os.listdir(download_path) if f.endswith('.mp3')]
                     if downloaded_files:
                         filepath = os.path.join(download_path, downloaded_files[0])
+                        filename = os.path.basename(filepath)
+                        background_tasks.add_task(clean_temp_file, filepath)
+                        background_tasks.add_task(shutil.rmtree, download_path, ignore_errors=True)
+                        
+                        return FileResponse(
+                            path=filepath,
+                            media_type="audio/mpeg",
+                            filename=filename,
+                            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+                        )
                     else:
-                        raise Exception("No se encontró el archivo descargado")
-                
-                filename = os.path.basename(filepath)
-                
-                background_tasks.add_task(clean_temp_file, filepath)
-                background_tasks.add_task(shutil.rmtree, download_path, ignore_errors=True)
-                
-                return FileResponse(
-                    path=filepath,
-                    media_type="audio/mpeg",
-                    filename=filename,
-                    headers={"Content-Disposition": f'attachment; filename="{filename}"'}
-                )
+                        raise Exception("No se encontró el archivo MP3 convertido")
+                        
         except Exception as e:
             shutil.rmtree(download_path, ignore_errors=True)
             error_msg = str(e)
@@ -292,7 +314,7 @@ def health_check():
     """Endpoint para verificar el estado del servidor"""
     return {
         "status": "healthy",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "ffmpeg_available": os.path.exists(FFMPEG_PATH),
         "temp_dir": TEMP_DIR
     }
