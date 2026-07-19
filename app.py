@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
 
-app = FastAPI(title="AuraTube API", version="6.1.0")
+app = FastAPI(title="AuraTube API", version="6.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -25,7 +25,16 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 COOKIE_FILE = "cookies.txt"
 HAS_COOKIES = os.path.exists(COOKIE_FILE)
 
-print(f"✅ Cookies disponibles: {HAS_COOKIES}")
+if HAS_COOKIES:
+    with open(COOKIE_FILE, 'r') as f:
+        content = f.read()
+        if "youtube.com" in content and "Netscape" in content:
+            print(f"✅ COOKIES VÁLIDAS: {COOKIE_FILE} ({len(content)} bytes)")
+        else:
+            print(f"⚠️ COOKIES INVÁLIDAS")
+            HAS_COOKIES = False
+else:
+    print(f"❌ No se encontró archivo cookies.txt")
 
 def clean_temp_file(filepath: str):
     if os.path.exists(filepath):
@@ -39,7 +48,7 @@ def clean_temp_file(filepath: str):
 def index():
     return {
         "service": "AuraTube API",
-        "version": "6.1.0",
+        "version": "6.3.0",
         "cookies_available": HAS_COOKIES,
         "endpoints": {
             "/health": "Estado del servidor",
@@ -52,46 +61,36 @@ def index():
 def health():
     return {
         "status": "healthy",
-        "version": "6.1.0",
+        "version": "6.3.0",
         "cookies_available": HAS_COOKIES,
         "ffmpeg_available": os.path.exists(FFMPEG_PATH)
     }
 
 @app.get("/info")
 def video_info(url: str = Query(..., description="URL de YouTube")):
-    """Obtiene información del video usando cookies"""
+    if not HAS_COOKIES:
+        return JSONResponse(
+            status_code=403,
+            content={"success": False, "error": "❌ No hay cookies disponibles"}
+        )
+    
     try:
-        # Configuración con cookies OBLIGATORIAS
+        print(f"🔍 Obteniendo info de: {url}")
+        
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
             'extract_flat': False,
+            'cookiefile': COOKIE_FILE,
             'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Sec-Fetch-Mode': 'navigate',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             },
             'extractor_args': {
                 'youtube': {
                     'player_client': ['android', 'ios'],
-                    'skip': ['hls', 'dash'],
                 }
             }
         }
-        
-        # FORZAR USO DE COOKIES
-        if HAS_COOKIES:
-            ydl_opts['cookiefile'] = COOKIE_FILE
-            print(f"✅ Usando cookies: {COOKIE_FILE}")
-        else:
-            return JSONResponse(
-                status_code=403,
-                content={
-                    "success": False, 
-                    "error": "Se requieren cookies para acceder a YouTube. Sube un archivo cookies.txt"
-                }
-            )
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -99,20 +98,17 @@ def video_info(url: str = Query(..., description="URL de YouTube")):
             if not info:
                 return JSONResponse(
                     status_code=404,
-                    content={"success": False, "error": "No se pudo obtener información del video"}
+                    content={"success": False, "error": "No se pudo obtener información"}
                 )
             
-            # Extraer datos
             formats = []
-            for f in info.get('formats', []):
+            for f in info.get('formats', [])[:10]:
                 formats.append({
                     "format_id": f.get('format_id'),
                     "ext": f.get('ext'),
                     "resolution": f.get('resolution', 'N/A'),
                     "filesize": f.get('filesize', 0),
-                    "format_note": f.get('format_note', ''),
-                    "vcodec": f.get('vcodec', 'none'),
-                    "acodec": f.get('acodec', 'none')
+                    "format_note": f.get('format_note', '')
                 })
             
             return {
@@ -122,7 +118,7 @@ def video_info(url: str = Query(..., description="URL de YouTube")):
                 "thumbnail": info.get('thumbnail', ''),
                 "uploader": info.get('uploader', 'Desconocido'),
                 "view_count": info.get('view_count', 0),
-                "formats": formats[:10]  # Solo primeros 10 formatos
+                "formats": formats
             }
             
     except Exception as e:
@@ -142,7 +138,7 @@ def download(
     if not HAS_COOKIES:
         raise HTTPException(
             status_code=403,
-            detail="Se requieren cookies para descargar. Sube un archivo cookies.txt"
+            detail="❌ No hay cookies disponibles"
         )
     
     download_id = str(uuid.uuid4())
@@ -151,21 +147,20 @@ def download(
     
     print(f"⬇️ Descargando: {url} | Modo: {mode}")
 
+    # Configuración BASE
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'ignoreerrors': False,
         'retries': 10,
         'fragment_retries': 10,
-        'cookiefile': COOKIE_FILE,  # FORZAR cookies
+        'cookiefile': COOKIE_FILE,
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         },
         'extractor_args': {
             'youtube': {
                 'player_client': ['android', 'ios'],
-                'skip': ['hls', 'dash'],
             }
         },
         'outtmpl': os.path.join(download_path, '%(title)s.%(ext)s'),
@@ -173,13 +168,15 @@ def download(
     }
 
     if mode == "video":
-        ydl_opts['format'] = 'best[height<=720][ext=mp4]/best[ext=mp4]/best'
+        # USAR FORMATO GENÉRICO - SIEMPRE DISPONIBLE
+        ydl_opts['format'] = 'bestvideo+bestaudio/best'
         
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
                 filepath = ydl.prepare_filename(info)
                 
+                # Buscar archivo descargado
                 if os.path.exists(filepath):
                     filename = os.path.basename(filepath)
                     background_tasks.add_task(clean_temp_file, filepath)
@@ -190,6 +187,7 @@ def download(
                         filename=filename
                     )
                 else:
+                    # Buscar cualquier archivo
                     files = os.listdir(download_path)
                     if files:
                         filepath = os.path.join(download_path, files[0])
@@ -205,9 +203,34 @@ def download(
                     
         except Exception as e:
             shutil.rmtree(download_path, ignore_errors=True)
-            raise HTTPException(status_code=500, detail=str(e))
+            error_msg = str(e)
+            print(f"❌ Error en video: {error_msg}")
+            
+            # INTENTAR CON FORMATO AÚN MÁS GENÉRICO
+            if "Requested format is not available" in error_msg:
+                try:
+                    print("🔄 Intentando con formato 'best'...")
+                    ydl_opts['format'] = 'best'
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(url, download=True)
+                        filepath = ydl.prepare_filename(info)
+                        if os.path.exists(filepath):
+                            filename = os.path.basename(filepath)
+                            background_tasks.add_task(clean_temp_file, filepath)
+                            background_tasks.add_task(shutil.rmtree, download_path, ignore_errors=True)
+                            return FileResponse(
+                                path=filepath,
+                                media_type="video/mp4",
+                                filename=filename
+                            )
+                except Exception as e2:
+                    print(f"❌ Falló el fallback: {e2}")
+                    error_msg = str(e2)
+            
+            raise HTTPException(status_code=500, detail=error_msg)
     
     else:  # audio
+        # USAR FORMATO GENÉRICO DE AUDIO
         ydl_opts.update({
             'format': 'bestaudio/best',
             'postprocessors': [{
@@ -248,4 +271,29 @@ def download(
                     
         except Exception as e:
             shutil.rmtree(download_path, ignore_errors=True)
-            raise HTTPException(status_code=500, detail=str(e))
+            error_msg = str(e)
+            print(f"❌ Error en audio: {error_msg}")
+            
+            # INTENTAR CON FORMATO ALTERNATIVO
+            if "Requested format is not available" in error_msg:
+                try:
+                    print("🔄 Intentando con formato alternativo...")
+                    ydl_opts['format'] = 'bestaudio'
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(url, download=True)
+                        filepath = ydl.prepare_filename(info)
+                        mp3_file = os.path.splitext(filepath)[0] + ".mp3"
+                        if os.path.exists(mp3_file):
+                            filename = os.path.basename(mp3_file)
+                            background_tasks.add_task(clean_temp_file, mp3_file)
+                            background_tasks.add_task(shutil.rmtree, download_path, ignore_errors=True)
+                            return FileResponse(
+                                path=mp3_file,
+                                media_type="audio/mpeg",
+                                filename=filename
+                            )
+                except Exception as e2:
+                    print(f"❌ Falló el fallback: {e2}")
+                    error_msg = str(e2)
+            
+            raise HTTPException(status_code=500, detail=error_msg)
